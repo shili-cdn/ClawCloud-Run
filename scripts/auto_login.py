@@ -28,6 +28,15 @@ SIGNIN_URL = f"{LOGIN_ENTRY_URL}/signin"
 DEVICE_VERIFY_WAIT = 30  # Mobile验证 默认等 30 秒
 TWO_FACTOR_WAIT = int(os.environ.get("TWO_FACTOR_WAIT", "120"))  # 2FA验证 默认等 120 秒
 
+# 需要遍历访问的区域基础 URL 列表 <<<
+TARGET_REGION_URLS = [
+    "https://ap-southeast-1.run.claw.cloud",
+    "https://us-east-1.run.claw.cloud",
+    "https://eu-central-1.run.claw.cloud",
+    "https://us-west-1.run.claw.cloud",
+    "https://ap-northeast-1.run.claw.cloud"
+]
+
 
 class Telegram:
     """Telegram 通知"""
@@ -641,38 +650,32 @@ class AutoLogin:
         return False
     
     def keepalive(self, page):
-        """保活 - 使用检测到的区域 URL"""
-        self.log("保活...", "STEP")
+        """保活 - 遍历访问所有指定区域"""
+        self.log("开始遍历所有区域...", "STEP")
         
-        # 使用检测到的区域 URL，如果没有则使用默认
-        base_url = self.get_base_url()
-        self.log(f"使用区域 URL: {base_url}", "INFO")
-        
-        pages_to_visit = [
-            (f"{base_url}/", "控制台"),
-            (f"{base_url}/apps", "应用"),
-        ]
-        
-        # 如果检测到了区域，可以额外访问一些区域特定页面
-        if self.detected_region:
-            self.log(f"当前区域: {self.detected_region}", "INFO")
-        
-        for url, name in pages_to_visit:
-            try:
-                page.goto(url, timeout=30000)
-                page.wait_for_load_state('networkidle', timeout=15000)
-                self.log(f"已访问: {name} ({url})", "SUCCESS")
-                
-                # 再次检测区域（以防中途跳转）
-                current_url = page.url
-                if 'claw.cloud' in current_url:
-                    self.detect_region(current_url)
-                
-                time.sleep(2)
-            except Exception as e:
-                self.log(f"访问 {name} 失败: {e}", "WARN")
-        
-        self.shot(page, "完成")
+        success_count = 0
+        for base_url in TARGET_REGION_URLS:
+            self.log(f"正在访问区域: {base_url}", "INFO")
+            
+            # 每个区域访问控制台首页和应用(实例)列表
+            pages_to_visit = [
+                (f"{base_url}/", "控制台"),
+                (f"{base_url}/apps", "应用列表"),
+            ]
+            
+            for url, name in pages_to_visit:
+                try:
+                    page.goto(url, timeout=30000)
+                    page.wait_for_load_state('networkidle', timeout=15000)
+                    self.log(f"  ✅ 已访问: {name} ({url})", "SUCCESS")
+                    time.sleep(2) # 页面间稍作停留，避免请求过快
+                except Exception as e:
+                    self.log(f"  ❌ 访问 {name} ({url}) 失败: {e}", "WARN")
+            
+            success_count += 1
+            
+        self.log(f"区域遍历完成，共处理 {success_count} 个区域", "SUCCESS")
+        self.shot(page, "全区域遍历完成")
     
     def notify(self, ok, err=""):
         if not self.tg.ok:
