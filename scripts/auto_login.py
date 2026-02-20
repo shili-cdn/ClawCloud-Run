@@ -620,30 +620,58 @@ class AutoLogin:
         if 'github.com/login/oauth/authorize' in page.url:
             self.log("处理 OAuth...", "STEP")
             self.shot(page, "oauth")
-            self.click(page, ['button[name="authorize"]', 'button:has-text("Authorize")'], "授权")
-            time.sleep(3)
-            page.wait_for_load_state('networkidle', timeout=30000)
+            
+            # 定位授权按钮，更精确匹配
+            btn = page.locator('button[name="authorize"], button:has-text("Authorize ClawCloud"), button:has-text("Authorize")').first
+            
+            if btn.is_visible(timeout=5000):
+                btn.click()
+                self.log("✅ 已点击授权按钮 (仅触发一次)", "SUCCESS")
+                
+                # 关键修复：不要用 networkidle，直接等待 URL 发生变化（离开当前页）
+                try:
+                    page.wait_for_function(f"window.location.href !== '{page.url}'", timeout=15000)
+                except:
+                    pass
+            else:
+                self.log("⚠️ 未找到授权按钮", "WARN")
     
     def wait_redirect(self, page, wait=60):
         """等待重定向并检测区域"""
         self.log("等待重定向...", "STEP")
+        
+        # 🌟 关键修复：增加防连点标志
+        oauth_clicked = False 
+        
         for i in range(wait):
             url = page.url
             
             # 检查是否已跳转到 claw.cloud
             if 'claw.cloud' in url and 'signin' not in url.lower():
                 self.log("重定向成功！", "SUCCESS")
-                
-                # 检测并记录区域
                 self.detect_region(url)
-                
                 return True
             
+            # 如果在授权页
             if 'github.com/login/oauth/authorize' in url:
-                self.oauth(page)
+                if not oauth_clicked:
+                    self.oauth(page)
+                    oauth_clicked = True  # 标记为已点击，彻底斩断连点死循环
+                else:
+                    # 如果已经点过了，就耐心等，不要再去执行 oauth()
+                    if i % 3 == 0:
+                        self.log("等待 GitHub 授权处理中...", "INFO")
             
+            # 顺便检测一下是否撞到了 GitHub 的 What 报错页
+            try:
+                if page.locator('text="What?"').is_visible(timeout=500) and page.locator('text="Your browser did something unexpected"').is_visible(timeout=500):
+                    self.log("❌ 触发 GitHub 状态异常错误 (What?)", "ERROR")
+                    return False
+            except:
+                pass
+                
             time.sleep(1)
-            if i % 10 == 0:
+            if i % 10 == 0 and i > 0:
                 self.log(f"  等待... ({i}秒)")
         
         self.log("重定向超时", "ERROR")
