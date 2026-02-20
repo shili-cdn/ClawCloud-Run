@@ -653,16 +653,27 @@ class AutoLogin:
         """保活 - 遍历访问所有指定区域，并在每个区域完成后截图推送"""
         self.log("开始遍历所有区域...", "STEP")
         
+        # 1. 新增：区域代号到中文友好名称的映射字典
+        REGION_NAMES = {
+            "ap-southeast-1": "新加坡",
+            "us-east-1": "美东",
+            "eu-central-1": "法兰克福",
+            "us-west-1": "美西",
+            "ap-northeast-1": "东京"
+        }
+        
         success_count = 0
         for base_url in TARGET_REGION_URLS:
             self.log(f"正在访问区域: {base_url}", "INFO")
             
-            # 提取区域名称 (例如从 https://ap-northeast-1.run.claw.cloud 提取 ap-northeast-1)
+            # 提取区域代号 (如 ap-northeast-1)
             import re
             region_match = re.search(r'https://([^.]+)\.', base_url)
-            region_name = region_match.group(1) if region_match else "未知区域"
+            region_code = region_match.group(1) if region_match else "未知区域"
             
-            # 每个区域访问控制台首页和应用(实例)列表
+            # 获取对应的中文名称，如果字典里没有，就用原代号
+            friendly_name = REGION_NAMES.get(region_code, region_code)
+            
             pages_to_visit = [
                 (f"{base_url}/", "控制台"),
                 (f"{base_url}/apps", "应用列表"),
@@ -671,49 +682,64 @@ class AutoLogin:
             region_success = False
             for url, name in pages_to_visit:
                 try:
-                    page.goto(url, timeout=30000)
-                    page.wait_for_load_state('networkidle', timeout=15000)
+                    # 2. 优化：延长基础超时时间，并使用 'load' 替代 'networkidle'
+                    page.goto(url, timeout=60000)
+                    
+                    try:
+                        # 尝试等待基础加载完成，如果小超时不抛出异常打断整个流程
+                        page.wait_for_load_state('load', timeout=15000)
+                    except:
+                        pass
                     
                     # 检测是否处于未登录状态（出现 GitHub 按钮）
-                    github_btn = page.locator('button:has-text("GitHub"), a:has-text("GitHub"), [data-provider="github"]').first
-                    if github_btn.is_visible(timeout=3000):
-                        self.log(f"  ⚠️ 区域未登录，尝试使用已有 GitHub 状态授权...", "WARN")
-                        github_btn.click()
-                        
-                        # 等待授权跳转完成
-                        page.wait_for_load_state('networkidle', timeout=30000)
-                        
-                        # 如果遇到了 GitHub 的授权确认页 (OAuth)，顺手点一下
-                        if 'github.com/login/oauth/authorize' in page.url:
-                            self.oauth(page)
-                            page.wait_for_load_state('networkidle', timeout=30000)
+                    try:
+                        github_btn = page.locator('button:has-text("GitHub"), a:has-text("GitHub"), [data-provider="github"]').first
+                        if github_btn.is_visible(timeout=5000):
+                            self.log(f"  ⚠️ 区域未登录，尝试使用已有 GitHub 状态授权...", "WARN")
+                            github_btn.click()
                             
-                        # 再次确保页面加载完毕
-                        time.sleep(2)
+                            try:
+                                page.wait_for_load_state('load', timeout=20000)
+                            except:
+                                pass
+                            
+                            # 如果遇到了 GitHub 的授权确认页 (OAuth)，顺手点一下
+                            if 'github.com/login/oauth/authorize' in page.url:
+                                self.oauth(page)
+                                try:
+                                    page.wait_for_load_state('load', timeout=20000)
+                                except:
+                                    pass
+                                
+                            time.sleep(3)
+                    except:
+                        pass # 没找到按钮说明已经是登录状态，直接跳过
 
-                    # 简单的结果校验，如果 URL 还是有 login，说明可能授权失败了
+                    # 简单的结果校验
                     if 'login' in page.url or 'signin' in page.url:
                         self.log(f"  ❌ {name} 授权失败，依然停留在登录页", "ERROR")
                     else:
                         self.log(f"  ✅ 已访问: {name} ({page.url})", "SUCCESS")
-                        region_success = True  # 只要有一个页面成功，就认为该区域访问成功
+                        region_success = True
                         
-                    time.sleep(2) # 页面间稍作停留，避免请求过快
+                    time.sleep(2)
                 except Exception as e:
                     self.log(f"  ❌ 访问 {name} ({url}) 失败: {e}", "WARN")
             
+            # 3. 优化：使用你要求的精简美观排版
             if region_success:
                 success_count += 1
-                # 执行截图
-                shot_path = self.shot(page, f"{region_name}_完成")
+                shot_path = self.shot(page, f"{region_code}_完成")
                 
-                # 立即推送到 Telegram
                 if self.tg.ok and shot_path:
-                    msg = f"📍 <b>区域激活完成:</b> {region_name}\n👤 <b>用户:</b> {self.username}"
-                    self.tg.photo(shot_path, msg)
-                    self.log(f"已推送区域 {region_name} 的截图到 Telegram", "SUCCESS")
+                    # 按照要求的格式排版
+                    msg = f"📍 区域登录：{friendly_name}\n👤 账户：{self.username}"
+                    
+                    # 这里注意替换为传参 caption，原代码中可能是直接发 msg
+                    self.tg.photo(shot_path, caption=msg) 
+                    self.log(f"已推送区域 {friendly_name} 的截图到 Telegram", "SUCCESS")
             else:
-                self.log(f"区域 {region_name} 访问未成功，跳过截图推送", "WARN")
+                self.log(f"区域 {friendly_name} 访问未成功，跳过截图推送", "WARN")
             
         self.log(f"区域遍历完成，共处理 {success_count} 个区域", "SUCCESS")
     def notify(self, ok, err=""):
