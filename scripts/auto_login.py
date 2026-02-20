@@ -28,15 +28,6 @@ SIGNIN_URL = f"{LOGIN_ENTRY_URL}/signin"
 DEVICE_VERIFY_WAIT = 30  # Mobile验证 默认等 30 秒
 TWO_FACTOR_WAIT = int(os.environ.get("TWO_FACTOR_WAIT", "120"))  # 2FA验证 默认等 120 秒
 
-# 需要遍历访问的区域基础 URL 列表 <<<
-TARGET_REGION_URLS = [
-    "https://ap-southeast-1.run.claw.cloud",
-    "https://us-east-1.run.claw.cloud",
-    "https://eu-central-1.run.claw.cloud",
-    "https://us-west-1.run.claw.cloud",
-    "https://ap-northeast-1.run.claw.cloud"
-]
-
 
 class Telegram:
     """Telegram 通知"""
@@ -620,156 +611,69 @@ class AutoLogin:
         if 'github.com/login/oauth/authorize' in page.url:
             self.log("处理 OAuth...", "STEP")
             self.shot(page, "oauth")
-            
-            # 定位授权按钮，更精确匹配
-            btn = page.locator('button[name="authorize"], button:has-text("Authorize ClawCloud"), button:has-text("Authorize")').first
-            
-            if btn.is_visible(timeout=5000):
-                btn.click()
-                self.log("✅ 已点击授权按钮 (仅触发一次)", "SUCCESS")
-                
-                # 关键修复：不要用 networkidle，直接等待 URL 发生变化（离开当前页）
-                try:
-                    page.wait_for_function(f"window.location.href !== '{page.url}'", timeout=15000)
-                except:
-                    pass
-            else:
-                self.log("⚠️ 未找到授权按钮", "WARN")
+            self.click(page, ['button[name="authorize"]', 'button:has-text("Authorize")'], "授权")
+            time.sleep(3)
+            page.wait_for_load_state('networkidle', timeout=30000)
     
     def wait_redirect(self, page, wait=60):
         """等待重定向并检测区域"""
         self.log("等待重定向...", "STEP")
-        
-        # 🌟 关键修复：增加防连点标志
-        oauth_clicked = False 
-        
         for i in range(wait):
             url = page.url
             
             # 检查是否已跳转到 claw.cloud
             if 'claw.cloud' in url and 'signin' not in url.lower():
                 self.log("重定向成功！", "SUCCESS")
+                
+                # 检测并记录区域
                 self.detect_region(url)
+                
                 return True
             
-            # 如果在授权页
             if 'github.com/login/oauth/authorize' in url:
-                if not oauth_clicked:
-                    self.oauth(page)
-                    oauth_clicked = True  # 标记为已点击，彻底斩断连点死循环
-                else:
-                    # 如果已经点过了，就耐心等，不要再去执行 oauth()
-                    if i % 3 == 0:
-                        self.log("等待 GitHub 授权处理中...", "INFO")
+                self.oauth(page)
             
-            # 顺便检测一下是否撞到了 GitHub 的 What 报错页
-            try:
-                if page.locator('text="What?"').is_visible(timeout=500) and page.locator('text="Your browser did something unexpected"').is_visible(timeout=500):
-                    self.log("❌ 触发 GitHub 状态异常错误 (What?)", "ERROR")
-                    return False
-            except:
-                pass
-                
             time.sleep(1)
-            if i % 10 == 0 and i > 0:
+            if i % 10 == 0:
                 self.log(f"  等待... ({i}秒)")
         
         self.log("重定向超时", "ERROR")
         return False
     
     def keepalive(self, page):
-        """保活 - 遍历访问所有指定区域，并在每个区域完成后截图推送"""
-        self.log("开始遍历所有区域...", "STEP")
+        """保活 - 使用检测到的区域 URL"""
+        self.log("保活...", "STEP")
         
-        # 1. 新增：区域代号到中文友好名称的映射字典
-        REGION_NAMES = {
-            "ap-southeast-1": "新加坡",
-            "us-east-1": "美东",
-            "eu-central-1": "法兰克福",
-            "us-west-1": "美西",
-            "ap-northeast-1": "东京"
-        }
+        # 使用检测到的区域 URL，如果没有则使用默认
+        base_url = self.get_base_url()
+        self.log(f"使用区域 URL: {base_url}", "INFO")
         
-        success_count = 0
-        for base_url in TARGET_REGION_URLS:
-            self.log(f"正在访问区域: {base_url}", "INFO")
-            
-            # 提取区域代号 (如 ap-northeast-1)
-            import re
-            region_match = re.search(r'https://([^.]+)\.', base_url)
-            region_code = region_match.group(1) if region_match else "未知区域"
-            
-            # 获取对应的中文名称，如果字典里没有，就用原代号
-            friendly_name = REGION_NAMES.get(region_code, region_code)
-            
-            pages_to_visit = [
-                (f"{base_url}/", "控制台"),
-                (f"{base_url}/apps", "应用列表"),
-            ]
-            
-            region_success = False
-            for url, name in pages_to_visit:
-                try:
-                    # 2. 优化：延长基础超时时间，并使用 'load' 替代 'networkidle'
-                    page.goto(url, timeout=60000)
-                    
-                    try:
-                        # 尝试等待基础加载完成，如果小超时不抛出异常打断整个流程
-                        page.wait_for_load_state('load', timeout=15000)
-                    except:
-                        pass
-                    
-                    # 检测是否处于未登录状态（出现 GitHub 按钮）
-                    try:
-                        github_btn = page.locator('button:has-text("GitHub"), a:has-text("GitHub"), [data-provider="github"]').first
-                        if github_btn.is_visible(timeout=5000):
-                            self.log(f"  ⚠️ 区域未登录，尝试使用已有 GitHub 状态授权...", "WARN")
-                            github_btn.click()
-                            
-                            try:
-                                page.wait_for_load_state('load', timeout=20000)
-                            except:
-                                pass
-                            
-                            # 如果遇到了 GitHub 的授权确认页 (OAuth)，顺手点一下
-                            if 'github.com/login/oauth/authorize' in page.url:
-                                self.oauth(page)
-                                try:
-                                    page.wait_for_load_state('load', timeout=20000)
-                                except:
-                                    pass
-                                
-                            time.sleep(3)
-                    except:
-                        pass # 没找到按钮说明已经是登录状态，直接跳过
-
-                    # 简单的结果校验
-                    if 'login' in page.url or 'signin' in page.url:
-                        self.log(f"  ❌ {name} 授权失败，依然停留在登录页", "ERROR")
-                    else:
-                        self.log(f"  ✅ 已访问: {name} ({page.url})", "SUCCESS")
-                        region_success = True
-                        
-                    time.sleep(2)
-                except Exception as e:
-                    self.log(f"  ❌ 访问 {name} ({url}) 失败: {e}", "WARN")
-            
-            # 3. 优化：使用你要求的精简美观排版
-            if region_success:
-                success_count += 1
-                shot_path = self.shot(page, f"{region_code}_完成")
+        pages_to_visit = [
+            (f"{base_url}/", "控制台"),
+            (f"{base_url}/apps", "应用"),
+        ]
+        
+        # 如果检测到了区域，可以额外访问一些区域特定页面
+        if self.detected_region:
+            self.log(f"当前区域: {self.detected_region}", "INFO")
+        
+        for url, name in pages_to_visit:
+            try:
+                page.goto(url, timeout=30000)
+                page.wait_for_load_state('networkidle', timeout=15000)
+                self.log(f"已访问: {name} ({url})", "SUCCESS")
                 
-                if self.tg.ok and shot_path:
-                    # 按照要求的格式排版
-                    msg = f"📍 区域登录：{friendly_name}\n👤 账户：{self.username}"
-                    
-                    # 这里注意替换为传参 caption，原代码中可能是直接发 msg
-                    self.tg.photo(shot_path, caption=msg) 
-                    self.log(f"已推送区域 {friendly_name} 的截图到 Telegram", "SUCCESS")
-            else:
-                self.log(f"区域 {friendly_name} 访问未成功，跳过截图推送", "WARN")
-            
-        self.log(f"区域遍历完成，共处理 {success_count} 个区域", "SUCCESS")
+                # 再次检测区域（以防中途跳转）
+                current_url = page.url
+                if 'claw.cloud' in current_url:
+                    self.detect_region(current_url)
+                
+                time.sleep(2)
+            except Exception as e:
+                self.log(f"访问 {name} 失败: {e}", "WARN")
+        
+        self.shot(page, "完成")
+    
     def notify(self, ok, err=""):
         if not self.tg.ok:
             return
@@ -912,15 +816,7 @@ class AutoLogin:
                     sys.exit(1)
                 
                 time.sleep(3)
-                
-                # === 修改这里：将 networkidle 替换为 load，并捕获可能的加载超时 ===
-                try:
-                    # 最多等30秒基础结构加载，即使网络没完全闲置也继续往下走
-                    page.wait_for_load_state('load', timeout=30000)
-                except Exception as e:
-                    self.log("等待 GitHub 跳转超时，可能卡在授权页，强制继续...", "WARN")
-                # ==============================================================
-                
+                page.wait_for_load_state('networkidle', timeout=120000)
                 self.shot(page, "点击后")
                 url = page.url
                 self.log(f"当前: {url}")
@@ -943,23 +839,14 @@ class AutoLogin:
                 # 3. GitHub 登录
                 self.log("步骤3: GitHub 认证", "STEP")
                 
-                # ⚠️ 修复逻辑陷阱：必须优先判断是否为授权页，因为它的 URL 也包含 'login'
-                if 'github.com/login/oauth/authorize' in url:
-                    self.log("检测到 OAuth 授权确认页，准备点击...", "SUCCESS")
-                    self.oauth(page)
-                    
-                    # 授权后等待一下跳转，并更新当前的 url 变量供后续步骤使用
-                    try:
-                        page.wait_for_load_state('load', timeout=20000)
-                    except:
-                        pass
-                    url = page.url 
-                    
-                elif 'github.com/login' in url or 'github.com/session' in url:
+                if 'github.com/login' in url or 'github.com/session' in url:
                     if not self.login_github(page, context):
                         self.shot(page, "登录失败")
                         self.notify(False, "GitHub 登录失败")
                         sys.exit(1)
+                elif 'github.com/login/oauth/authorize' in url:
+                    self.log("Cookie 有效", "SUCCESS")
+                    self.oauth(page)
                 
                 # 4. 等待重定向（会自动检测区域）
                 self.log("步骤4: 等待重定向", "STEP")
